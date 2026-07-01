@@ -306,7 +306,11 @@ func (z *Rasterizer) accumulateMask() {
 		} else {
 			z.bufU32 = z.bufU32[:n]
 		}
-		if haveAccumulateSIMD {
+
+		// --- Диспетчер для AVX2 ---
+		if haveAVX2() {
+			floatingAccumulateMaskAVX2(z.bufU32, z.bufF32)
+		} else if haveAccumulateSIMD {
 			floatingAccumulateMaskSIMD(z.bufU32, z.bufF32)
 		} else {
 			floatingAccumulateMask(z.bufU32, z.bufF32)
@@ -326,13 +330,17 @@ func (z *Rasterizer) rasterizeDstAlphaSrcOpaqueOpOver(dst *image.Alpha, r image.
 		// We bypass the z.accumulateMask step and convert straight from
 		// z.bufF32 or z.bufU32 to dst.Pix.
 		if z.useFloatingPointMath {
-			if haveAccumulateSIMD {
+			if haveAVX2() {
+				floatingAccumulateOpOverAVX2(dst.Pix, z.bufF32)
+			} else if haveAccumulateSIMD {
 				floatingAccumulateOpOverSIMD(dst.Pix, z.bufF32)
 			} else {
 				floatingAccumulateOpOver(dst.Pix, z.bufF32)
 			}
 		} else {
-			if haveAccumulateSIMD {
+			if haveAVX2() {
+				fixedAccumulateOpOverAVX2(dst.Pix, z.bufU32)
+			} else if haveAccumulateSIMD {
 				fixedAccumulateOpOverSIMD(dst.Pix, z.bufU32)
 			} else {
 				fixedAccumulateOpOver(dst.Pix, z.bufU32)
@@ -362,13 +370,17 @@ func (z *Rasterizer) rasterizeDstAlphaSrcOpaqueOpSrc(dst *image.Alpha, r image.R
 		// We bypass the z.accumulateMask step and convert straight from
 		// z.bufF32 or z.bufU32 to dst.Pix.
 		if z.useFloatingPointMath {
-			if haveAccumulateSIMD {
+			if haveAVX2() {
+				floatingAccumulateOpSrcAVX2(dst.Pix, z.bufF32)
+			} else if haveAccumulateSIMD {
 				floatingAccumulateOpSrcSIMD(dst.Pix, z.bufF32)
 			} else {
 				floatingAccumulateOpSrc(dst.Pix, z.bufF32)
 			}
 		} else {
-			if haveAccumulateSIMD {
+			if haveAVX2() {
+				fixedAccumulateOpSrcAVX2(dst.Pix, z.bufU32)
+			} else if haveAccumulateSIMD {
 				fixedAccumulateOpSrcSIMD(dst.Pix, z.bufU32)
 			} else {
 				fixedAccumulateOpSrc(dst.Pix, z.bufU32)

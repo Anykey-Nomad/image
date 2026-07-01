@@ -14,3 +14,8 @@ func fixedAccumulateMaskSIMD(buf []uint32)                    {}
 func floatingAccumulateOpOverSIMD(dst []uint8, src []float32) {}
 func floatingAccumulateOpSrcSIMD(dst []uint8, src []float32)  {}
 func floatingAccumulateMaskSIMD(dst []uint32, src []float32)  {}
+
+func haveAVX2() bool                                             { return false }
+func floatingAccumulateMaskAVX2(dst []uint32, src []float32)     {}
+func floatingAccumulateOpOverAVX2(dst []uint8, src []float32)    {}
+func floatingAccumulateOpSrcAVX2(dst []uint8, src []float32)     {}

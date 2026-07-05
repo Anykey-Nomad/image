@@ -11,7 +11,7 @@ import (
 	"log"
 	"strings"
 
-	"golang.org/x/image/riff"
+	"github.com/Anykey-Nomad/image-simd/riff"
 )
 
 func ExampleReader() {

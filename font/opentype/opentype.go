@@ -6,20 +6,20 @@
 // OTF (OpenType Fonts).
 //
 // This package provides a high-level API, centered on the NewFace function,
-// implementing the golang.org/x/image/font.Face interface.
+// implementing the github.com/Anykey-Nomad/image-simd/font.Face interface.
 //
-// The sibling golang.org/x/image/font/sfnt package provides a low-level API.
-package opentype // import "golang.org/x/image/font/opentype"
+// The sibling github.com/Anykey-Nomad/image-simd/font/sfnt package provides a low-level API.
+package opentype // import "github.com/Anykey-Nomad/image-simd/font/opentype"
 
 import (
 	"image"
 	"image/draw"
 	"io"
 
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/sfnt"
-	"golang.org/x/image/math/fixed"
-	"golang.org/x/image/vector"
+	"github.com/Anykey-Nomad/image-simd/font"
+	"github.com/Anykey-Nomad/image-simd/font/sfnt"
+	"github.com/Anykey-Nomad/image-simd/math/fixed"
+	"github.com/Anykey-Nomad/image-simd/vector"
 )
 
 // ParseCollection parses an OpenType font collection, such as TTC or OTC data,

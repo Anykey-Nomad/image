@@ -11,10 +11,10 @@ import (
 	"log"
 	"os"
 
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/gofont/goitalic"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
+	"github.com/Anykey-Nomad/image-simd/font"
+	"github.com/Anykey-Nomad/image-simd/font/gofont/goitalic"
+	"github.com/Anykey-Nomad/image-simd/font/opentype"
+	"github.com/Anykey-Nomad/image-simd/math/fixed"
 )
 
 func ExampleNewFace() {

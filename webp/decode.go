@@ -12,9 +12,9 @@ import (
 	"image/color"
 	"io"
 
-	"golang.org/x/image/riff"
-	"golang.org/x/image/vp8"
-	"golang.org/x/image/vp8l"
+	"github.com/Anykey-Nomad/image-simd/riff"
+	"github.com/Anykey-Nomad/image-simd/vp8"
+	"github.com/Anykey-Nomad/image-simd/vp8l"
 )
 
 var errInvalidFormat = errors.New("webp: invalid format")

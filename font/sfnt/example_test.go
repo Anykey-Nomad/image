@@ -10,10 +10,10 @@ import (
 	"log"
 	"os"
 
-	"golang.org/x/image/font/gofont/goregular"
-	"golang.org/x/image/font/sfnt"
-	"golang.org/x/image/math/fixed"
-	"golang.org/x/image/vector"
+	"github.com/Anykey-Nomad/image-simd/font/gofont/goregular"
+	"github.com/Anykey-Nomad/image-simd/font/sfnt"
+	"github.com/Anykey-Nomad/image-simd/math/fixed"
+	"github.com/Anykey-Nomad/image-simd/vector"
 )
 
 func Example_rasterizeGlyph() {

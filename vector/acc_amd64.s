@@ -87,10 +87,13 @@ TEXT ·fixedAccumulateOpOverSIMD(SB), NOSPLIT, $0-48
 	CMPQ BX, R10
 	JLT  fxAccOpOverEnd
 
-	// R10 = len(src) &^ 3
+	// R10 = len(src) &^ 8 (for Loop8)
 	// R11 = len(src)
+	// R12 = len(src) &^ 4 (for Loop4 fallback)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
 	// fxAlmost65536 := XMM(0x0000ffff repeated four times) // Maximum of an uint16.
 	MOVOU fxAlmost65536<>(SB), X5
@@ -110,14 +113,16 @@ TEXT ·fixedAccumulateOpOverSIMD(SB), NOSPLIT, $0-48
 	// i := 0
 	MOVQ $0, R9
 
-fxAccOpOverLoop4:
-	// for i < (len(src) &^ 3)
+fxAccOpOverLoop8:
+	// for i < (len(src) &^ 8)
 	CMPQ R9, R10
-	JAE  fxAccOpOverLoop1
+	JAE  fxAccOpOverLoop4
+
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 (elements 0-3) ---
 
 	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
 	MOVOU (SI), X1
 
 	// scratch = XMM(0, s0, s1, s2)
@@ -126,8 +131,7 @@ fxAccOpOverLoop4:
 	PSLLO $4, X0
 	PADDD X0, X1
 
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
+	// scratch = XMM(0, 0, s0, s0+s1)
 	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
@@ -143,58 +147,115 @@ fxAccOpOverLoop4:
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
-	// Blend over the dst's prior value. SIMD for i in 0..3:
-	//
-	// dstA := uint32(dst[i]) * 0x101
-	// maskA := z@i
-	// outA := dstA*(0xffff-maskA)/0xffff + maskA
-	// dst[i] = uint8(outA >> 8)
-	//
-	// First, set X0 to dstA*(0xfff-maskA).
+	// Blend over the dst's prior value.
 	MOVL   (DI), X0
 	PSHUFB X8, X0
 	MOVOU  X9, X11
 	PSUBL  X2, X11
 	PMULLD X11, X0
-
-	// We implement uint32 division by 0xffff as multiplication by a magic
-	// constant (0x800080001) and then a shift by a magic constant (47).
-	// See TestDivideByFFFF for a justification.
-	//
-	// That multiplication widens from uint32 to uint64, so we have to
-	// duplicate and shift our four uint32s from one XMM register (X0) to
-	// two XMM registers (X0 and X11).
-	//
-	// Move the second and fourth uint32s in X0 to be the first and third
-	// uint32s in X11.
-	MOVOU X0, X11
-	PSRLQ $32, X11
-
-	// Multiply by magic, shift by magic.
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
 	PMULULQ X10, X0
 	PMULULQ X10, X11
 	PSRLQ   $47, X0
 	PSRLQ   $47, X11
-
-	// Merge the two registers back to one, X11, and add maskA.
-	PSLLQ $32, X11
-	XORPS X0, X11
-	PADDD X11, X2
-
-	// As per opSrcStore4, shuffle and copy the 4 second-lowest bytes.
-	PSHUFB X6, X2
-	MOVL   X2, (DI)
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
 
 	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	// i += 4; dst += 4; src += 16
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 (elements 4-7) ---
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	MOVL   (DI), X0
+	PSHUFB X8, X0
+	MOVOU  X9, X11
+	PSUBL  X2, X11
+	PMULLD X11, X0
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
+	PMULULQ X10, X0
+	PMULULQ X10, X11
+	PSRLQ   $47, X0
+	PSRLQ   $47, X11
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
+
+	// offset = XMM(x@3, x@3, x@3, x@3)
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+	JMP  fxAccOpOverLoop8
+
+fxAccOpOverLoop4:
+	// for i < (len(src) &^ 4)
+	CMPQ R9, R12
+	JAE  fxAccOpOverLoop1
+
+	// x = XMM(s0, s1, s2, s3)
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	MOVL   (DI), X0
+	PSHUFB X8, X0
+	MOVOU  X9, X11
+	PSUBL  X2, X11
+	PMULLD X11, X0
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
+	PMULULQ X10, X0
+	PMULULQ X10, X11
+	PSRLQ   $47, X0
+	PSRLQ   $47, X11
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $4, DI
 	ADDQ $16, SI
@@ -216,15 +277,7 @@ fxAccOpOverLoop1:
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
 	// Blend over the dst's prior value.
-	//
-	// dstA := uint32(dst[0]) * 0x101
-	// maskA := z
-	// outA := dstA*(0xffff-maskA)/0xffff + maskA
-	// dst[0] = uint8(outA >> 8)
 	MOVBLZX (DI), R12
 	IMULL   $0x101, R12
 	MOVL    X2, R13
@@ -281,106 +334,120 @@ TEXT ·fixedAccumulateOpSrcSIMD(SB), NOSPLIT, $0-48
 	CMPQ BX, R10
 	JLT  fxAccOpSrcEnd
 
-	// R10 = len(src) &^ 3
-	// R11 = len(src)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
-	// fxAlmost65536 := XMM(0x0000ffff repeated four times) // Maximum of an uint16.
 	MOVOU fxAlmost65536<>(SB), X5
-
-	// gather := XMM(see above) // PSHUFB shuffle mask.
 	MOVOU gather<>(SB), X6
 
-	// offset := XMM(0x00000000 repeated four times) // Cumulative sum.
 	XORPS X7, X7
+	MOVQ  $0, R9
 
-	// i := 0
-	MOVQ $0, R9
-
-fxAccOpSrcLoop4:
-	// for i < (len(src) &^ 3)
+fxAccOpSrcLoop8:
 	CMPQ R9, R10
-	JAE  fxAccOpSrcLoop1
+	JAE  fxAccOpSrcLoop4
 
-	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 ---
 	MOVOU (SI), X1
 
-	// scratch = XMM(0, s0, s1, s2)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s1+s2, s2+s3)
 	MOVOU X1, X0
 	PSLLO $4, X0
 	PADDD X0, X1
-
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
 	PADDD  X0, X1
+	PADDD  X7, X1
 
-	// x += offset
-	PADDD X7, X1
-
-	// y = abs(x)
-	// y >>= 2 // Shift by 2*ϕ - 16.
-	// y = min(y, fxAlmost65536)
 	PABSD  X1, X2
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
-	// z = shuffleTheSecondLowestBytesOfEach4ByteElement(z)
-	// copy(dst[:4], low4BytesOf(z))
 	PSHUFB X6, X2
 	MOVL   X2, (DI)
 
-	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 ---
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	PSHUFB X6, X2
+	MOVL   X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+	JMP  fxAccOpSrcLoop8
+
+fxAccOpSrcLoop4:
+	CMPQ R9, R12
+	JAE  fxAccOpSrcLoop1
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	PSHUFB X6, X2
+	MOVL   X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $4, DI
 	ADDQ $16, SI
 	JMP  fxAccOpSrcLoop4
 
 fxAccOpSrcLoop1:
-	// for i < len(src)
 	CMPQ R9, R11
 	JAE  fxAccOpSrcEnd
 
-	// x = src[i] + offset
 	MOVL  (SI), X1
 	PADDD X7, X1
 
-	// y = abs(x)
-	// y >>= 2 // Shift by 2*ϕ - 16.
-	// y = min(y, fxAlmost65536)
 	PABSD  X1, X2
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
-	// dst[0] = uint8(z>>8)
 	MOVL X2, BX
 	SHRL $8, BX
 	MOVB BX, (DI)
 
-	// offset = x
 	MOVOU X1, X7
 
-	// i += 1
-	// dst = dst[1:]
-	// src = src[1:]
 	ADDQ $1, R9
 	ADDQ $1, DI
 	ADDQ $4, SI
@@ -414,99 +481,114 @@ TEXT ·fixedAccumulateMaskSIMD(SB), NOSPLIT, $0-24
 	MOVQ buf_base+0(FP), SI
 	MOVQ buf_len+8(FP), R10
 
-	// R10 = len(src) &^ 3
-	// R11 = len(src)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
-	// fxAlmost65536 := XMM(0x0000ffff repeated four times) // Maximum of an uint16.
 	MOVOU fxAlmost65536<>(SB), X5
 
-	// offset := XMM(0x00000000 repeated four times) // Cumulative sum.
 	XORPS X7, X7
+	MOVQ  $0, R9
 
-	// i := 0
-	MOVQ $0, R9
-
-fxAccMaskLoop4:
-	// for i < (len(src) &^ 3)
+fxAccMaskLoop8:
 	CMPQ R9, R10
-	JAE  fxAccMaskLoop1
+	JAE  fxAccMaskLoop4
 
-	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 ---
 	MOVOU (SI), X1
 
-	// scratch = XMM(0, s0, s1, s2)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s1+s2, s2+s3)
 	MOVOU X1, X0
 	PSLLO $4, X0
 	PADDD X0, X1
-
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
 	PADDD  X0, X1
+	PADDD  X7, X1
 
-	// x += offset
-	PADDD X7, X1
-
-	// y = abs(x)
-	// y >>= 2 // Shift by 2*ϕ - 16.
-	// y = min(y, fxAlmost65536)
 	PABSD  X1, X2
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
-	// copy(dst[:4], z)
 	MOVOU X2, (DI)
 
-	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	ADDQ $4, R9
+	ADDQ $16, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 ---
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	MOVOU X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $16, DI
+	ADDQ $16, SI
+	JMP  fxAccMaskLoop8
+
+fxAccMaskLoop4:
+	CMPQ R9, R12
+	JAE  fxAccMaskLoop1
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	PADDD X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	PADDD  X0, X1
+	PADDD  X7, X1
+
+	PABSD  X1, X2
+	PSRLL  $2, X2
+	PMINUD X5, X2
+
+	MOVOU X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $16, DI
 	ADDQ $16, SI
 	JMP  fxAccMaskLoop4
 
 fxAccMaskLoop1:
-	// for i < len(src)
 	CMPQ R9, R11
 	JAE  fxAccMaskEnd
 
-	// x = src[i] + offset
 	MOVL  (SI), X1
 	PADDD X7, X1
 
-	// y = abs(x)
-	// y >>= 2 // Shift by 2*ϕ - 16.
-	// y = min(y, fxAlmost65536)
 	PABSD  X1, X2
 	PSRLL  $2, X2
 	PMINUD X5, X2
 
-	// z = convertToInt32(y)
-	// No-op.
-
-	// dst[0] = uint32(z)
 	MOVL X2, (DI)
 
-	// offset = x
 	MOVOU X1, X7
 
-	// i += 1
-	// dst = dst[1:]
-	// src = src[1:]
 	ADDQ $1, R9
 	ADDQ $4, DI
 	ADDQ $4, SI
@@ -544,10 +626,10 @@ TEXT ·floatingAccumulateOpOverSIMD(SB), NOSPLIT, $8-48
 	CMPQ BX, R10
 	JLT  flAccOpOverEnd
 
-	// R10 = len(src) &^ 3
-	// R11 = len(src)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
 	// Prepare to set MXCSR bits 13 and 14, so that the CVTPS2PL below is
 	// "Round To Zero".
@@ -556,168 +638,192 @@ TEXT ·floatingAccumulateOpOverSIMD(SB), NOSPLIT, $8-48
 	ORL     $0x6000, AX
 	MOVL    AX, mxcsrNew-4(SP)
 
-	// flSignMask    := XMM(0x7fffffff repeated four times) // All but the sign bit of a float32.
-	// flOne         := XMM(0x3f800000 repeated four times) // 1 as a float32.
-	// flAlmost65536 := XMM(0x477fffff repeated four times) // 255.99998 * 256 as a float32.
 	MOVOU flSignMask<>(SB), X3
 	MOVOU flOne<>(SB), X4
 	MOVOU flAlmost65536<>(SB), X5
 
-	// gather               := XMM(see above)                      // PSHUFB shuffle mask.
-	// scatterAndMulBy0x101 := XMM(see above)                      // PSHUFB shuffle mask.
-	// fxAlmost65536        := XMM(0x0000ffff repeated four times) // 0xffff.
-	// inverseFFFF          := XMM(0x80008001 repeated four times) // Magic constant for dividing by 0xffff.
 	MOVOU gather<>(SB), X6
 	MOVOU scatterAndMulBy0x101<>(SB), X8
 	MOVOU fxAlmost65536<>(SB), X9
 	MOVOU inverseFFFF<>(SB), X10
 
-	// offset := XMM(0x00000000 repeated four times) // Cumulative sum.
 	XORPS X7, X7
+	MOVQ  $0, R9
 
-	// i := 0
-	MOVQ $0, R9
-
-flAccOpOverLoop4:
-	// for i < (len(src) &^ 3)
+flAccOpOverLoop8:
 	CMPQ R9, R10
-	JAE  flAccOpOverLoop1
+	JAE  flAccOpOverLoop4
 
-	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 ---
 	MOVOU (SI), X1
 
-	// scratch = XMM(0, s0, s1, s2)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s1+s2, s2+s3)
 	MOVOU X1, X0
 	PSLLO $4, X0
 	ADDPS X0, X1
-
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
 	ADDPS  X0, X1
+	ADDPS  X7, X1
 
-	// x += offset
-	ADDPS X7, X1
-
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// Blend over the dst's prior value. SIMD for i in 0..3:
-	//
-	// dstA := uint32(dst[i]) * 0x101
-	// maskA := z@i
-	// outA := dstA*(0xffff-maskA)/0xffff + maskA
-	// dst[i] = uint8(outA >> 8)
-	//
-	// First, set X0 to dstA*(0xfff-maskA).
 	MOVL   (DI), X0
 	PSHUFB X8, X0
 	MOVOU  X9, X11
 	PSUBL  X2, X11
 	PMULLD X11, X0
-
-	// We implement uint32 division by 0xffff as multiplication by a magic
-	// constant (0x800080001) and then a shift by a magic constant (47).
-	// See TestDivideByFFFF for a justification.
-	//
-	// That multiplication widens from uint32 to uint64, so we have to
-	// duplicate and shift our four uint32s from one XMM register (X0) to
-	// two XMM registers (X0 and X11).
-	//
-	// Move the second and fourth uint32s in X0 to be the first and third
-	// uint32s in X11.
-	MOVOU X0, X11
-	PSRLQ $32, X11
-
-	// Multiply by magic, shift by magic.
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
 	PMULULQ X10, X0
 	PMULULQ X10, X11
 	PSRLQ   $47, X0
 	PSRLQ   $47, X11
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
 
-	// Merge the two registers back to one, X11, and add maskA.
-	PSLLQ $32, X11
-	XORPS X0, X11
-	PADDD X11, X2
-
-	// As per opSrcStore4, shuffle and copy the 4 second-lowest bytes.
-	PSHUFB X6, X2
-	MOVL   X2, (DI)
-
-	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 ---
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	MOVL   (DI), X0
+	PSHUFB X8, X0
+	MOVOU  X9, X11
+	PSUBL  X2, X11
+	PMULLD X11, X0
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
+	PMULULQ X10, X0
+	PMULULQ X10, X11
+	PSRLQ   $47, X0
+	PSRLQ   $47, X11
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+	JMP  flAccOpOverLoop8
+
+flAccOpOverLoop4:
+	CMPQ R9, R12
+	JAE  flAccOpOverLoop1
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	MOVL   (DI), X0
+	PSHUFB X8, X0
+	MOVOU  X9, X11
+	PSUBL  X2, X11
+	PMULLD X11, X0
+	MOVOU  X0, X11
+	PSRLQ  $32, X11
+	PMULULQ X10, X0
+	PMULULQ X10, X11
+	PSRLQ   $47, X0
+	PSRLQ   $47, X11
+	PSLLQ   $32, X11
+	XORPS   X0, X11
+	PADDD   X11, X2
+	PSHUFB  X6, X2
+	MOVL    X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $4, DI
 	ADDQ $16, SI
 	JMP  flAccOpOverLoop4
 
 flAccOpOverLoop1:
-	// for i < len(src)
 	CMPQ R9, R11
 	JAE  flAccOpOverEnd
 
-	// x = src[i] + offset
 	MOVL  (SI), X1
 	ADDPS X7, X1
 
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// Blend over the dst's prior value.
-	//
-	// dstA := uint32(dst[0]) * 0x101
-	// maskA := z
-	// outA := dstA*(0xffff-maskA)/0xffff + maskA
-	// dst[0] = uint8(outA >> 8)
 	MOVBLZX (DI), R12
 	IMULL   $0x101, R12
 	MOVL    X2, R13
 	MOVL    $0xffff, AX
 	SUBL    R13, AX
-	MULL    R12             // MULL's implicit arg is AX, and the result is stored in DX:AX.
-	MOVL    $0x80008001, BX // Divide by 0xffff is to first multiply by a magic constant...
-	MULL    BX              // MULL's implicit arg is AX, and the result is stored in DX:AX.
-	SHRL    $15, DX         // ...and then shift by another magic constant (47 - 32 = 15).
+	MULL    R12
+	MOVL    $0x80008001, BX
+	MULL    BX
+	SHRL    $15, DX
 	ADDL    DX, R13
 	SHRL    $8, R13
 	MOVB    R13, (DI)
 
-	// offset = x
 	MOVOU X1, X7
 
-	// i += 1
-	// dst = dst[1:]
-	// src = src[1:]
 	ADDQ $1, R9
 	ADDQ $1, DI
 	ADDQ $4, SI
@@ -755,123 +861,147 @@ TEXT ·floatingAccumulateOpSrcSIMD(SB), NOSPLIT, $8-48
 	CMPQ BX, R10
 	JLT  flAccOpSrcEnd
 
-	// R10 = len(src) &^ 3
-	// R11 = len(src)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
-	// Prepare to set MXCSR bits 13 and 14, so that the CVTPS2PL below is
-	// "Round To Zero".
 	STMXCSR mxcsrOrig-8(SP)
 	MOVL    mxcsrOrig-8(SP), AX
 	ORL     $0x6000, AX
 	MOVL    AX, mxcsrNew-4(SP)
 
-	// flSignMask    := XMM(0x7fffffff repeated four times) // All but the sign bit of a float32.
-	// flOne         := XMM(0x3f800000 repeated four times) // 1 as a float32.
-	// flAlmost65536 := XMM(0x477fffff repeated four times) // 255.99998 * 256 as a float32.
 	MOVOU flSignMask<>(SB), X3
 	MOVOU flOne<>(SB), X4
 	MOVOU flAlmost65536<>(SB), X5
-
-	// gather := XMM(see above) // PSHUFB shuffle mask.
 	MOVOU gather<>(SB), X6
 
-	// offset := XMM(0x00000000 repeated four times) // Cumulative sum.
 	XORPS X7, X7
+	MOVQ  $0, R9
 
-	// i := 0
-	MOVQ $0, R9
-
-flAccOpSrcLoop4:
-	// for i < (len(src) &^ 3)
+flAccOpSrcLoop8:
 	CMPQ R9, R10
-	JAE  flAccOpSrcLoop1
+	JAE  flAccOpSrcLoop4
 
-	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 ---
 	MOVOU (SI), X1
 
-	// scratch = XMM(0, s0, s1, s2)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s1+s2, s2+s3)
 	MOVOU X1, X0
 	PSLLO $4, X0
 	ADDPS X0, X1
-
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
 	ADDPS  X0, X1
+	ADDPS  X7, X1
 
-	// x += offset
-	ADDPS X7, X1
-
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// z = shuffleTheSecondLowestBytesOfEach4ByteElement(z)
-	// copy(dst[:4], low4BytesOf(z))
 	PSHUFB X6, X2
 	MOVL   X2, (DI)
 
-	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 ---
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	PSHUFB X6, X2
+	MOVL   X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $4, DI
+	ADDQ $16, SI
+	JMP  flAccOpSrcLoop8
+
+flAccOpSrcLoop4:
+	CMPQ R9, R12
+	JAE  flAccOpSrcLoop1
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	PSHUFB X6, X2
+	MOVL   X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $4, DI
 	ADDQ $16, SI
 	JMP  flAccOpSrcLoop4
 
 flAccOpSrcLoop1:
-	// for i < len(src)
 	CMPQ R9, R11
 	JAE  flAccOpSrcEnd
 
-	// x = src[i] + offset
 	MOVL  (SI), X1
 	ADDPS X7, X1
 
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// dst[0] = uint8(z>>8)
 	MOVL X2, BX
 	SHRL $8, BX
 	MOVB BX, (DI)
 
-	// offset = x
 	MOVOU X1, X7
 
-	// i += 1
-	// dst = dst[1:]
-	// src = src[1:]
 	ADDQ $1, R9
 	ADDQ $1, DI
 	ADDQ $4, SI
@@ -909,116 +1039,141 @@ TEXT ·floatingAccumulateMaskSIMD(SB), NOSPLIT, $8-48
 	CMPQ BX, R10
 	JLT  flAccMaskEnd
 
-	// R10 = len(src) &^ 3
-	// R11 = len(src)
 	MOVQ R10, R11
-	ANDQ $-4, R10
+	MOVQ R10, R12
+	ANDQ $-8, R10
+	ANDQ $-4, R12
 
-	// Prepare to set MXCSR bits 13 and 14, so that the CVTPS2PL below is
-	// "Round To Zero".
 	STMXCSR mxcsrOrig-8(SP)
 	MOVL    mxcsrOrig-8(SP), AX
 	ORL     $0x6000, AX
 	MOVL    AX, mxcsrNew-4(SP)
 
-	// flSignMask    := XMM(0x7fffffff repeated four times) // All but the sign bit of a float32.
-	// flOne         := XMM(0x3f800000 repeated four times) // 1 as a float32.
-	// flAlmost65536 := XMM(0x477fffff repeated four times) // 255.99998 * 256 as a float32.
 	MOVOU flSignMask<>(SB), X3
 	MOVOU flOne<>(SB), X4
 	MOVOU flAlmost65536<>(SB), X5
 
-	// offset := XMM(0x00000000 repeated four times) // Cumulative sum.
 	XORPS X7, X7
+	MOVQ  $0, R9
 
-	// i := 0
-	MOVQ $0, R9
-
-flAccMaskLoop4:
-	// for i < (len(src) &^ 3)
+flAccMaskLoop8:
 	CMPQ R9, R10
-	JAE  flAccMaskLoop1
+	JAE  flAccMaskLoop4
 
-	// x = XMM(s0, s1, s2, s3)
-	//
-	// Where s0 is src[i+0], s1 is src[i+1], etc.
+	PREFETCHT0 64(SI)
+
+	// --- Batch 1 ---
 	MOVOU (SI), X1
 
-	// scratch = XMM(0, s0, s1, s2)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s1+s2, s2+s3)
 	MOVOU X1, X0
 	PSLLO $4, X0
 	ADDPS X0, X1
-
-	// scratch = XMM(0, 0, 0, 0)
-	// scratch = XMM(scratch@0, scratch@0, x@0, x@1) // yields scratch == XMM(0, 0, s0, s0+s1)
-	// x += scratch                                  // yields x == XMM(s0, s0+s1, s0+s1+s2, s0+s1+s2+s3)
 	XORPS  X0, X0
 	SHUFPS $0x40, X1, X0
 	ADDPS  X0, X1
+	ADDPS  X7, X1
 
-	// x += offset
-	ADDPS X7, X1
-
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// copy(dst[:4], z)
 	MOVOU X2, (DI)
 
-	// offset = XMM(x@3, x@3, x@3, x@3)
 	MOVOU  X1, X7
 	SHUFPS $0xff, X1, X7
 
-	// i += 4
-	// dst = dst[4:]
-	// src = src[4:]
+	ADDQ $4, R9
+	ADDQ $16, DI
+	ADDQ $16, SI
+
+	// --- Batch 2 ---
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	MOVOU X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
+	ADDQ $4, R9
+	ADDQ $16, DI
+	ADDQ $16, SI
+	JMP  flAccMaskLoop8
+
+flAccMaskLoop4:
+	CMPQ R9, R12
+	JAE  flAccMaskLoop1
+
+	MOVOU (SI), X1
+
+	MOVOU X1, X0
+	PSLLO $4, X0
+	ADDPS X0, X1
+	XORPS  X0, X0
+	SHUFPS $0x40, X1, X0
+	ADDPS  X0, X1
+	ADDPS  X7, X1
+
+	MOVOU X3, X2
+	ANDPS X1, X2
+	MINPS X4, X2
+	MULPS X5, X2
+
+	LDMXCSR  mxcsrNew-4(SP)
+	CVTPS2PL X2, X2
+	LDMXCSR  mxcsrOrig-8(SP)
+
+	MOVOU X2, (DI)
+
+	MOVOU  X1, X7
+	SHUFPS $0xff, X1, X7
+
 	ADDQ $4, R9
 	ADDQ $16, DI
 	ADDQ $16, SI
 	JMP  flAccMaskLoop4
 
 flAccMaskLoop1:
-	// for i < len(src)
 	CMPQ R9, R11
 	JAE  flAccMaskEnd
 
-	// x = src[i] + offset
 	MOVL  (SI), X1
 	ADDPS X7, X1
 
-	// y = x & flSignMask
-	// y = min(y, flOne)
-	// y = mul(y, flAlmost65536)
 	MOVOU X3, X2
 	ANDPS X1, X2
 	MINPS X4, X2
 	MULPS X5, X2
 
-	// z = convertToInt32(y)
 	LDMXCSR  mxcsrNew-4(SP)
 	CVTPS2PL X2, X2
 	LDMXCSR  mxcsrOrig-8(SP)
 
-	// dst[0] = uint32(z)
 	MOVL X2, (DI)
 
-	// offset = x
 	MOVOU X1, X7
 
-	// i += 1
-	// dst = dst[1:]
-	// src = src[1:]
 	ADDQ $1, R9
 	ADDQ $4, DI
 	ADDQ $4, SI

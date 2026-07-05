@@ -10,7 +10,7 @@
 // This package provides a low-level API and does not depend on vector
 // rasterization packages. Glyphs are represented as vectors, not pixels.
 //
-// The sibling golang.org/x/image/font/opentype package provides a high-level
+// The sibling github.com/Anykey-Nomad/image-simd/font/opentype package provides a high-level
 // API, including glyph rasterization.
 //
 // This package provides a decoder in that it produces a TTF's glyphs (and
@@ -28,7 +28,7 @@
 // another io.Writer, copying the underlying TTF file, but this package does
 // not provide an encoder. Specifically, there is no API to build a different
 // TTF file, whether 'from scratch' or by modifying an existing one.
-package sfnt // import "golang.org/x/image/font/sfnt"
+package sfnt // import "github.com/Anykey-Nomad/image-simd/font/sfnt"
 
 // This implementation was written primarily to the
 // https://www.microsoft.com/en-us/Typography/OpenTypeSpecification.aspx
@@ -46,8 +46,8 @@ import (
 	"image"
 	"io"
 
-	"golang.org/x/image/font"
-	"golang.org/x/image/math/fixed"
+	"github.com/Anykey-Nomad/image-simd/font"
+	"github.com/Anykey-Nomad/image-simd/math/fixed"
 	"golang.org/x/text/encoding/charmap"
 )
 

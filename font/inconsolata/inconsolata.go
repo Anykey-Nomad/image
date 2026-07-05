@@ -5,7 +5,7 @@
 //go:generate genbasicfont -size=16 -pkg=inconsolata -hinting=full -var=regular8x16 -fontfile=http://www.levien.com/type/myfonts/inconsolata/InconsolataGo-Regular.ttf
 //go:generate genbasicfont -size=16 -pkg=inconsolata -hinting=full -var=bold8x16 -fontfile=http://www.levien.com/type/myfonts/inconsolata/InconsolataGo-Bold.ttf
 
-// The genbasicfont program is github.com/golang/freetype/example/genbasicfont
+// The genbasicfont program is github.com/Anykey-Nomad/freetype-simd/example/genbasicfont
 
 // Package inconsolata provides pre-rendered bitmap versions of the Inconsolata
 // font family.
@@ -16,10 +16,10 @@
 //
 // Inconsolata's home page is at
 // http://www.levien.com/type/myfonts/inconsolata.html
-package inconsolata // import "golang.org/x/image/font/inconsolata"
+package inconsolata // import "github.com/Anykey-Nomad/image-simd/font/inconsolata"
 
 import (
-	"golang.org/x/image/font/basicfont"
+	"github.com/Anykey-Nomad/image-simd/font/basicfont"
 )
 
 // Regular8x16 is a regular weight, 8x16 font face.

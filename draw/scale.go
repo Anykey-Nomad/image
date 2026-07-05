@@ -12,7 +12,7 @@ import (
 	"math"
 	"sync"
 
-	"golang.org/x/image/math/f64"
+	"github.com/Anykey-Nomad/image-simd/math/f64"
 )
 
 // Copy copies the part of the source image defined by src and sr and writes
